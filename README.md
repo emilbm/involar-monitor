@@ -226,6 +226,64 @@ docker compose cp solar:/app/data/solar-backup-$(date +%F).db .
 
 ---
 
+## Error reporting
+
+Optional, off unless you set a DSN. It speaks the Sentry envelope protocol
+directly, which is what GlitchTip ingests, so there is no SDK and the project
+keeps its zero dependencies.
+
+```dotenv
+SENTRY_DSN=https://<key>@glitchtip.example.com/<project-id>
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=3.0.0
+```
+
+A malformed DSN fails at startup with a specific message rather than quietly
+dropping errors for weeks. With no DSN the reporter is an inert no-op - nothing
+is sent and no connection is attempted.
+
+Reported automatically: uncaught exceptions, unhandled promise rejections,
+startup failures, and any 5xx from the dashboard or API. Each event carries the
+stack trace, release, environment, hostname and - for HTTP errors - the route.
+
+### Testing it
+
+`GET /throw` raises a real exception inside the request handler, so it
+exercises the whole path rather than fabricating an event:
+
+```bash
+curl -s http://<vm-ip>:8080/throw
+```
+
+```json
+{"error":"Test exception from /throw - error reporting is wired up",
+ "eventId":"b4f333d0d7f6477eae8f26cad7c184d6"}
+```
+
+That `eventId` is searchable in GlitchTip, so you can confirm the round trip.
+The process is unaffected - the handler catches, reports, and answers 500.
+
+Whether reporting is working at all is visible without causing an error:
+
+```bash
+curl -s localhost:8080/api/status | jq .errorReporting
+```
+
+`sent`, `dropped` and `failed` counters tell you if events are leaving.
+
+### Deliberate limits
+
+Reporting can never take the service down. An unreachable server, a rejected
+event or a malformed DSN is logged and forgotten - never thrown, never retried
+into a storm. Events are capped at `SENTRY_MAX_EVENTS_PER_MINUTE` (30), and a
+429 mutes reporting for as long as the server's `Retry-After` says.
+
+The cost of going SDK-free is no breadcrumbs, no automatic instrumentation and
+no source context on frames - you get the exception, its cause chain, and the
+stack. For a service this size that is the part that matters.
+
+---
+
 ## JSON API
 
 The dashboard is a client of this; so can anything else on your LAN be
@@ -237,7 +295,8 @@ The dashboard is a client of this; so can anything else on your LAN be
 | `GET /api/series?from=&to=&resolution=` | power over time; `resolution` is `auto`, `sample`, `hour` or `day` |
 | `GET /api/summary?period=&limit=` | energy per `day`, `week` or `month` |
 | `GET /api/inverters?from=&to=` | per-inverter energy across a day range |
-| `GET /api/status` | uptime, frame counts, database stats |
+| `GET /api/status` | uptime, frame counts, database and error-reporting stats |
+| `GET /throw` | raises a test exception, to verify error reporting |
 | `GET /health` | 200 while the listeners are up — the Docker healthcheck |
 
 `from`/`to` are unix seconds on `/api/series`, and `YYYY-MM-DD` elsewhere.

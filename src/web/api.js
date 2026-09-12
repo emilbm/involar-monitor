@@ -96,7 +96,7 @@ function bad(message) {
 /**
  * The JSON API. Handlers return plain objects; the HTTP layer serialises them.
  */
-export function createApi({ store, clock, config, runtime }) {
+export function createApi({ store, clock, config, runtime, reporter }) {
   const label = (serial) => config.inverterLabels[serial] ?? null;
 
   return {
@@ -244,6 +244,7 @@ export function createApi({ store, clock, config, runtime }) {
         unknownFrames: runtime.unknownFrames,
         unlabelledSerials: [...runtime.seenSerials].filter((s) => !config.inverterLabels[s]),
         database: store.stats(),
+        errorReporting: reporter?.stats() ?? { enabled: false },
       };
     },
   };

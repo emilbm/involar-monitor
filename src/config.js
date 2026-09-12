@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { parseDsn } from './sentry.js';
 
 function str(name, fallback) {
   const v = process.env[name];
@@ -109,6 +110,17 @@ export function loadConfig(env = process.env) {
 
       inverterLabels: parseLabels(str('INVERTER_LABELS', '')),
 
+      sentry: {
+        // Empty disables reporting entirely. Works with GlitchTip, which
+        // ingests the same envelope protocol.
+        dsn: str('SENTRY_DSN', ''),
+        environment: str('SENTRY_ENVIRONMENT', 'production'),
+        release: str('SENTRY_RELEASE', ''),
+        serverName: str('SENTRY_SERVER_NAME', ''),
+        // A TCP server can fail in a tight loop; this caps one bad minute.
+        maxEventsPerMinute: int('SENTRY_MAX_EVENTS_PER_MINUTE', 30, { min: 1 }),
+      },
+
       relay: {
         enabled: bool('INVOLAR_RELAY', false),
         host: str('INVOLAR_SERVER', '62.28.182.144'),
@@ -128,6 +140,10 @@ export function loadConfig(env = process.env) {
     } catch {
       throw new Error(`Invalid configuration:\n  - TZ "${cfg.tz}" is not a recognised IANA time zone`);
     }
+
+    // Fail at startup on a malformed DSN, rather than silently dropping the
+    // first real error weeks later.
+    if (cfg.sentry.dsn) parseDsn(cfg.sentry.dsn);
 
     return cfg;
   } finally {

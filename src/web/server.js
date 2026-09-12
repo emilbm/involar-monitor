@@ -51,7 +51,7 @@ async function sendFile(res, filePath) {
  * Deliberately unauthenticated: this is a LAN dashboard for one household's
  * own generation data. Do not publish the port to the internet as-is.
  */
-export function createWebServer({ api, port, address }) {
+export function createWebServer({ api, port, address, reporter }) {
   const server = http.createServer((req, res) => {
     const started = Date.now();
     let url;
@@ -82,13 +82,34 @@ export function createWebServer({ api, port, address }) {
           return sendJson(res, 200, api.inverters(query));
         case '/api/status':
           return sendJson(res, 200, api.status());
+
+        case '/throw': {
+          // Deliberate failure, for confirming error reporting end to end.
+          // Thrown rather than fabricated, so it exercises the real path:
+          // the handler below catches it, reports it, and answers 500.
+          const err = new Error('Test exception from /throw - error reporting is wired up');
+          err.name = 'InvolarMonitorTestError';
+          throw err;
+        }
         default:
           break;
       }
     } catch (err) {
       const status = err.status ?? 500;
-      if (status >= 500) log.error(`${route} failed`, err);
-      return sendJson(res, status, { error: err.message });
+      if (status < 500) return sendJson(res, status, { error: err.message });
+
+      log.error(`${route} failed`, err);
+      const eventId = reporter?.capture(err, {
+        request: {
+          url: `${url.origin}${url.pathname}`,
+          method: req.method,
+          query_string: url.search.replace(/^\?/, ''),
+          headers: { 'User-Agent': req.headers['user-agent'] ?? '' },
+        },
+        tags: { route },
+      }) ?? null;
+
+      return sendJson(res, 500, { error: err.message, eventId });
     }
 
     if (route.startsWith('/api/')) return sendJson(res, 404, { error: 'no such endpoint' });

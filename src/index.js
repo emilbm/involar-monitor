@@ -6,6 +6,7 @@ import { EgateServer } from './server.js';
 import { RawLog } from './rawlog.js';
 import { createApi } from './web/api.js';
 import { createWebServer } from './web/server.js';
+import { createErrorReporter } from './sentry.js';
 
 const PRUNE_INTERVAL_MS = 6 * 3600 * 1000;
 
@@ -19,6 +20,14 @@ try {
 
 configureLogger({ level: cfg.logLevel, tz: cfg.tz });
 const log = createLogger('main');
+
+const reporter = createErrorReporter({
+  dsn: cfg.sentry.dsn,
+  environment: cfg.sentry.environment,
+  release: cfg.sentry.release || undefined,
+  serverName: cfg.sentry.serverName || undefined,
+  maxEventsPerMinute: cfg.sentry.maxEventsPerMinute,
+});
 
 const clock = createClock(cfg.tz);
 const store = new Store({
@@ -95,6 +104,7 @@ const api = createApi({
   store,
   clock,
   config: cfg,
+  reporter,
   runtime: new Proxy(runtime, {
     get: (t, k) => (k === 'connections' ? egate.openConnections : t[k]),
   }),
@@ -124,7 +134,7 @@ async function main() {
 
   if (cfg.web.enabled) {
     webServer = await createWebServer({
-      api, port: cfg.web.port, address: cfg.web.address,
+      api, port: cfg.web.port, address: cfg.web.address, reporter,
     });
   }
 }
@@ -140,6 +150,8 @@ async function shutdown(signal) {
     egate.close(),
     webServer && new Promise((r) => webServer.close(() => r())),
   ]);
+  // Give a last report a moment to leave, so a crash-on-shutdown is not lost.
+  await reporter.flush();
   rawLog.close();
   store.close();
   log.info('goodbye');
@@ -151,14 +163,18 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 
 process.on('unhandledRejection', (reason) => {
   log.error('unhandled promise rejection', reason instanceof Error ? reason : { reason });
+  reporter.capture(reason, { tags: { handler: 'unhandledRejection' } });
 });
 process.on('uncaughtException', (err) => {
-  // Let the container restart us rather than continue in an unknown state.
+  // Let the container restart us rather than continue in an unknown state,
+  // but give the report a moment to leave first.
   log.error('uncaught exception, exiting so the supervisor can restart us', err);
-  process.exit(1);
+  reporter.capture(err, { tags: { handler: 'uncaughtException' } });
+  reporter.flush(2000).finally(() => process.exit(1));
 });
 
 main().catch((err) => {
   log.error('failed to start', err);
-  process.exit(1);
+  reporter.capture(err, { tags: { handler: 'startup' } });
+  reporter.flush(2000).finally(() => process.exit(1));
 });
