@@ -1,5 +1,5 @@
 {
-  "name": "involar-solar",
+  "name": "involar-monitor",
   "version": "3.0.0",
   "description": "Receives DNS-redirected Involar/Sedas Egate solar telemetry, stores it in SQLite, and serves a dashboard",
   "license": "MIT",
@@ -16,6 +16,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/emilbm/involar2pvoutput.git"
+    "url": "git+https://github.com/emilbm/involar-monitor.git"
   }
 }

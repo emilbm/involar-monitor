@@ -1,8 +1,8 @@
 services:
   solar:
     build: .
-    image: involar-solar:3
-    container_name: involar-solar
+    image: involar-monitor:3
+    container_name: involar-monitor
     restart: unless-stopped
     env_file: .env
 

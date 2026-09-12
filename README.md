@@ -1,4 +1,4 @@
-# involar-solar
+# involar-monitor
 
 Receives telemetry from an Involar/Sedas **Egate** solar gateway, stores it
 locally, and serves a dashboard for it.
@@ -8,7 +8,7 @@ has `involar.com` hardcoded, so you point that name at a box on your own LAN
 using a DNS override, and this service answers in Involar's place.
 
 ```
- Egate ──TCP 1020/9800──▶ [ DNS override ] ──▶ involar-solar ──▶ SQLite ──▶ dashboard :8080
+ Egate ──TCP 1020/9800──▶ [ DNS override ] ──▶ involar-monitor ──▶ SQLite ──▶ dashboard :8080
 ```
 
 Nothing leaves the house and there are no accounts, keys, or third-party
@@ -21,8 +21,8 @@ services involved.
 On the Debian VM:
 
 ```bash
-git clone https://github.com/emilbm/involar2pvoutput.git
-cd involar2pvoutput
+git clone https://github.com/emilbm/involar-monitor.git
+cd involar-monitor
 cp .env.example .env
 ```
 
@@ -117,11 +117,20 @@ household's own array; there is nothing to filter against.
 The database runs in WAL mode with `synchronous=NORMAL`, which is the right
 trade for data that is nice to have rather than a ledger: fast writes, and a
 hard power cut at the wrong moment costs you recent history, never the live
-readings. Back it up if you care:
+readings.
+
+To back it up, use SQLite's own backup API rather than copying the file - a
+plain copy of a live WAL database can be inconsistent. Nothing has to stop:
 
 ```bash
-docker compose exec solar sh -c 'cd /app/data && sqlite3 solar.db ".backup backup.db"' 2>/dev/null \
-  || docker run --rm -v solar-data:/d -v "$PWD":/out alpine cp /d/solar.db /out/solar-backup.db
+docker compose exec solar node src/backup.js
+```
+
+That writes `solar-backup-YYYY-MM-DD.db` next to the database, inside the
+volume. To pull a copy out to the host:
+
+```bash
+docker compose cp solar:/app/data/solar-backup-$(date +%F).db .
 ```
 
 ---

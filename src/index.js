@@ -104,7 +104,7 @@ const timers = [];
 let webServer = null;
 
 async function main() {
-  log.info('involar-solar starting', {
+  log.info('involar-monitor starting', {
     tz: cfg.tz,
     ports: cfg.listen.ports,
     db: cfg.db.path,
