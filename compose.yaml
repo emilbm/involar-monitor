@@ -1,7 +1,11 @@
+# Deployment compose file. It pulls a published image - there is deliberately
+# no `build:` here, so a target host needs nothing but Docker, this file and
+# a .env. To build from a source checkout instead, see compose.build.yaml.
 services:
   solar:
-    build: .
-    image: involar-monitor:3
+    # Pin to a release tag (e.g. :3.0.0) if you would rather decide when to
+    # move. `latest` tracks the master branch.
+    image: ghcr.io/emilbm/involar-monitor:latest
     container_name: involar-monitor
     restart: unless-stopped
     env_file: .env

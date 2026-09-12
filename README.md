@@ -16,23 +16,114 @@ services involved.
 
 ---
 
-## Quick start (Docker)
+## Deploying
 
-On the Debian VM:
+Published images live at `ghcr.io/emilbm/involar-monitor`, built and smoke-tested
+by CI on every push to `master`. The target host needs Docker, this compose
+file, and a `.env` - no source checkout, no build step, no git.
 
-```bash
-git clone https://github.com/emilbm/involar-monitor.git
-cd involar-monitor
-cp .env.example .env
-```
-
-Set `TZ` in `.env` (everything else has a working default), then:
+On a fresh Debian VM:
 
 ```bash
-docker compose up -d --build
+curl -fsSL https://get.docker.com | sudo sh
 ```
 
-Open **http://\<vm-ip\>:8080**. Follow the logs with `docker compose logs -f`.
+```bash
+sudo usermod -aG docker $USER && newgrp docker
+```
+
+```bash
+mkdir -p ~/involar-monitor && cd ~/involar-monitor
+```
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/emilbm/involar-monitor/master/compose.yaml
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/emilbm/involar-monitor/master/.env.example -o .env
+```
+
+Set `TZ` in `.env` - everything else has a working default. Then:
+
+```bash
+docker compose up -d
+```
+
+Open **http://\<vm-ip\>:8080**. It will show zeros until the Egate finds it;
+see [Pointing the Egate at this host](#pointing-the-egate-at-this-host).
+
+`restart: unless-stopped` plus Docker's own systemd unit means it comes back
+after a reboot. Confirm rather than assume:
+
+```bash
+systemctl is-enabled docker && docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' involar-monitor
+```
+
+### Updating
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+The database lives in a named volume, so this never touches your history. To
+decide when you move instead of tracking `master`, pin a release in
+`compose.yaml`:
+
+```yaml
+image: ghcr.io/emilbm/involar-monitor:3.0.0
+```
+
+Rolling back is then a tag change and `docker compose up -d`.
+
+### Ports and firewall
+
+Three inbound ports, all of which should stay on the LAN:
+
+| Port | From | Why |
+|---|---|---|
+| 1020/tcp | the Egate | where it connects; the name and port are hardcoded in its firmware |
+| 9800/tcp | the Egate | some units use this instead - harmless to leave open |
+| 8080/tcp | your browser | dashboard and JSON API |
+
+The app makes **no outbound connections at all** - nothing leaves the house.
+The VM only needs outbound HTTPS for `docker compose pull` and apt.
+
+**Do not forward any of these from the internet.** The dashboard has no
+authentication, and the Egate listener speaks an unauthenticated protocol from
+a defunct vendor. If you want access from outside, use a VPN into the LAN, or
+put a reverse proxy with auth in front of 8080 - not a port forward.
+
+If you have not enabled a host firewall, there is nothing to configure: the VM
+sits behind NAT and Docker publishes the ports itself. If you *have* enabled
+`ufw`, know that **Docker bypasses it** - published ports are DNAT'd in the
+`DOCKER` chain, which is traversed before ufw's rules, so `ufw deny 8080` does
+nothing. The supported hook is the `DOCKER-USER` chain. To restrict the
+dashboard to your LAN subnet:
+
+```bash
+sudo iptables -I DOCKER-USER -p tcp --dport 8080 ! -s 192.168.1.0/24 -j DROP
+```
+
+Persist it with `iptables-persistent`, and adjust the subnet to match yours.
+
+The simpler alternative, if you just want the dashboard off other interfaces,
+is to bind the published port to one address in `compose.yaml`:
+
+```yaml
+- "192.168.1.50:8080:8080"
+```
+
+Proxmox's own firewall (Datacenter / Node / VM → Firewall) is off by default.
+If you have turned it on, the three ports above need allow rules there too.
+
+### Building from source instead
+
+Only if you have the checkout and want to run your own changes:
+
+```bash
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
 
 ---
 
@@ -231,6 +322,18 @@ mid-frame to exercise the stream reassembly:
 LISTEN_PORTS=11020 npm start
 node test/tools/fake-egate.js 127.0.0.1 11020
 ```
+
+### Releases
+
+CI publishes `ghcr.io/emilbm/involar-monitor` on every push to `master`
+(`:latest` plus `:sha-<commit>`), after running the tests and smoke-testing the
+built image. Tagging cuts a version:
+
+```bash
+git tag v3.1.0 && git push origin v3.1.0
+```
+
+That adds `:3.1.0` and `:3.1`, which is what a pinned deployment follows.
 
 ## Credits
 
