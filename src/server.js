@@ -40,11 +40,12 @@ export class EgateServer {
   #servers = [];
   #connections = new Set();
 
-  constructor(cfg, { onFrame, onRaw, stats }) {
+  constructor(cfg, { onFrame, onRaw, stats, reporter }) {
     this.cfg = cfg;
     this.onFrame = onFrame;
     this.onRaw = onRaw;
     this.stats = stats;
+    this.reporter = reporter;
   }
 
   async listen() {
@@ -63,6 +64,7 @@ export class EgateServer {
           reject(new Error(`could not bind port ${port}: ${err.message}`));
         } else {
           log.error(`server error on port ${port}`, err);
+          this.reporter?.capture(err, { tags: { component: 'egate-listener', port: String(port) } });
         }
       };
 
@@ -110,7 +112,14 @@ export class EgateServer {
           this.onFrame(decoded, { peer, port });
         }
       } catch (err) {
+        // The core path: a decoding bug or a failed database write surfaces
+        // here, and would otherwise only ever be a log line on a box nobody
+        // reads.
         log.error('failed to process incoming data', err);
+        this.reporter?.capture(err, {
+          tags: { component: 'egate-frames', port: String(port) },
+          extra: { peer, chunkBytes: chunk.length, pendingBytes: reader.pendingBytes },
+        });
       }
     });
 
@@ -119,6 +128,11 @@ export class EgateServer {
       this.#connections.delete(socket);
       log.info('Egate disconnected', { peer, port, open: this.#connections.size });
     });
+  }
+
+  /** The address the first listener actually bound, useful when port 0 is used. */
+  get address() {
+    return this.#servers[0]?.address() ?? null;
   }
 
   get openConnections() {

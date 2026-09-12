@@ -127,7 +127,10 @@ export function createWebServer({ api, port, address, reporter }) {
       .finally(() => log.debug('served', { route, ms: Date.now() - started }));
   });
 
-  server.on('error', (err) => log.error('web server error', err));
+  server.on('error', (err) => {
+    log.error('web server error', err);
+    reporter?.capture(err, { tags: { component: 'web-server' } });
+  });
   server.on('clientError', (err, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
   });

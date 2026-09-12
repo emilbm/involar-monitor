@@ -99,7 +99,7 @@ function onRaw(frame, decoded, port) {
   );
 }
 
-const egate = new EgateServer(cfg, { onFrame, onRaw, stats });
+const egate = new EgateServer(cfg, { onFrame, onRaw, stats, reporter });
 const api = createApi({
   store,
   clock,
@@ -129,7 +129,12 @@ async function main() {
   runtime.listening = true;
 
   timers.push(setInterval(() => {
-    try { store.prune(); } catch (err) { log.warn('prune failed', err); }
+    try {
+      store.prune();
+    } catch (err) {
+      log.warn('prune failed', err);
+      reporter.capture(err, { tags: { component: 'store-prune' } });
+    }
   }, PRUNE_INTERVAL_MS));
 
   if (cfg.web.enabled) {

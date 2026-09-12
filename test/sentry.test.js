@@ -241,3 +241,50 @@ test('flush resolves even when the server never answers', async () => {
   hung.closeAllConnections();
   await new Promise((res) => hung.close(res));
 });
+
+// ------------------------------------------------- wiring into the TCP path
+
+test('a failure while processing Egate frames is reported, not just logged', async () => {
+  const { EgateServer } = await import('../src/server.js');
+  const net = await import('node:net');
+
+  const captured = [];
+  const reporter = { capture: (err, ctx) => { captured.push({ err, ctx }); return 'id'; } };
+
+  const server = new EgateServer(
+    {
+      listen: { address: '127.0.0.1', ports: [0], maxConnections: 4, idleTimeoutMs: 0 },
+      relay: { enabled: false },
+    },
+    {
+      // Stand in for a decoding bug or a failed database write.
+      onFrame: () => { throw new Error('simulated store failure'); },
+      stats: { connectionOpened() {}, bytesReceived() {} },
+      reporter,
+    },
+  );
+
+  await server.listen();
+  const { port } = server.address;
+
+  await new Promise((resolve, reject) => {
+    const client = net.createConnection({ host: '127.0.0.1', port }, () => {
+      const frame = Buffer.alloc(32);
+      frame.writeUInt16BE(0xffff, 0);
+      frame[2] = 0xe9; // keepalive - decodes fine, so the throw comes from onFrame
+      client.end(frame);
+    });
+    client.on('close', resolve);
+    client.on('error', reject);
+  });
+
+  // Let the socket 'data' handler run.
+  await new Promise((r) => { setTimeout(r, 200); });
+
+  assert.equal(captured.length, 1, 'the failure reached the reporter');
+  assert.equal(captured[0].err.message, 'simulated store failure');
+  assert.equal(captured[0].ctx.tags.component, 'egate-frames');
+  assert.ok(captured[0].ctx.extra.peer, 'carries the peer for context');
+
+  await server.close();
+});

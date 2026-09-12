@@ -242,9 +242,25 @@ A malformed DSN fails at startup with a specific message rather than quietly
 dropping errors for weeks. With no DSN the reporter is an inert no-op - nothing
 is sent and no connection is attempted.
 
-Reported automatically: uncaught exceptions, unhandled promise rejections,
-startup failures, and any 5xx from the dashboard or API. Each event carries the
-stack trace, release, environment, hostname and - for HTTP errors - the route.
+### What is reported
+
+| Path | Tag |
+|---|---|
+| Uncaught exceptions | `handler:uncaughtException` |
+| Unhandled promise rejections | `handler:unhandledRejection` |
+| Startup failures | `handler:startup` |
+| Any 5xx from the dashboard or API | `route:<path>` |
+| A failure decoding or storing an Egate frame | `component:egate-frames` |
+| A TCP listener erroring after bind | `component:egate-listener` |
+| A web server error | `component:web-server` |
+| A failed retention prune | `component:store-prune` |
+
+Every event carries the stack, release, environment and hostname.
+
+**Deliberately not reported**, because they are routine rather than faults:
+a socket error or an idle connection being closed (the Egate reconnects),
+an undecodable frame (counted in `/api/status` instead), relay failures, and
+raw-log write errors. Reporting those would bury the ones that matter.
 
 ### Testing it
 
