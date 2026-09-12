@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 function str(name, fallback) {
   const v = process.env[name];
   return v === undefined || v === '' ? fallback : v;
@@ -31,11 +33,11 @@ function ports(name, fallback) {
 }
 
 /**
- * Accepts either JSON (`{"1a2b":"12345"}`) or a compact list
- * (`1a2b=12345,3c4d=23456`). Serial keys are the last 4 hex digits of the
- * micro-inverter serial, lower-cased; values are PVOutput system ids.
+ * Optional display names for the micro-inverters, so the dashboard can say
+ * "Roof south" instead of "1a2b". Accepts JSON or `1a2b=Roof south,3c4d=Garage`.
+ * Unlabelled inverters still appear, under their serial.
  */
-export function parseMapping(raw) {
+export function parseLabels(raw) {
   if (!raw) return {};
   const out = {};
   const trimmed = raw.trim();
@@ -45,26 +47,23 @@ export function parseMapping(raw) {
     try {
       parsed = JSON.parse(trimmed);
     } catch (err) {
-      throw new Error(`PVOUTPUT_MICROINVERTER_MAPPING is not valid JSON: ${err.message}`);
+      throw new Error(`INVERTER_LABELS is not valid JSON: ${err.message}`);
     }
     for (const [k, v] of Object.entries(parsed)) out[String(k).toLowerCase()] = String(v);
   } else {
     for (const pair of trimmed.split(',')) {
       if (!pair.trim()) continue;
-      const m = pair.split(/[=:]/);
-      if (m.length !== 2 || !m[0].trim() || !m[1].trim()) {
-        throw new Error(`PVOUTPUT_MICROINVERTER_MAPPING entry "${pair}" must look like serial=systemId`);
+      const at = pair.indexOf('=');
+      if (at <= 0 || at === pair.length - 1) {
+        throw new Error(`INVERTER_LABELS entry "${pair}" must look like serial=Name`);
       }
-      out[m[0].trim().toLowerCase()] = m[1].trim();
+      out[pair.slice(0, at).trim().toLowerCase()] = pair.slice(at + 1).trim();
     }
   }
 
-  for (const [serial, sid] of Object.entries(out)) {
+  for (const serial of Object.keys(out)) {
     if (!/^[0-9a-f]{4}$/.test(serial)) {
-      throw new Error(`Micro-inverter serial "${serial}" must be exactly 4 hex digits`);
-    }
-    if (!/^\d+$/.test(sid)) {
-      throw new Error(`PVOutput system id for serial "${serial}" must be numeric, got "${sid}"`);
+      throw new Error(`Inverter serial "${serial}" must be exactly 4 hex digits`);
     }
   }
   return out;
@@ -74,9 +73,12 @@ export function loadConfig(env = process.env) {
   const previous = process.env;
   process.env = env;
   try {
+    const dataDir = str('DATA_DIR', './data');
+
     const cfg = {
       tz: str('TZ', 'Europe/Amsterdam'),
       logLevel: str('LOG_LEVEL', 'info'),
+      dataDir,
 
       listen: {
         address: str('LISTEN_ADDRESS', '0.0.0.0'),
@@ -85,31 +87,27 @@ export function loadConfig(env = process.env) {
         idleTimeoutMs: int('SOCKET_IDLE_TIMEOUT_SECONDS', 900, { min: 0 }) * 1000,
       },
 
-      health: {
-        enabled: bool('HEALTH_ENABLED', true),
-        port: int('HEALTH_PORT', 8080, { min: 1, max: 65535 }),
+      db: {
+        path: str('DB_PATH', path.join(dataDir, 'solar.db')),
+        // Raw samples are pruned past this; the hourly and daily rollups that
+        // the charts fall back to are kept forever. 0 disables pruning.
+        retentionDays: int('SAMPLE_RETENTION_DAYS', 400, { min: 0 }),
+        // A gap longer than this contributes no energy, so an outage or the
+        // overnight silence cannot invent generation that never happened.
+        maxGapSeconds: int('ENERGY_MAX_GAP_SECONDS', 900, { min: 30 }),
       },
 
-      pvoutput: {
-        apiKey: str('PVOUTPUT_API_KEY', ''),
-        systemId: str('PVOUTPUT_SYSTEM_ID', ''),
-        baseUrl: str('PVOUTPUT_BASE_URL', 'https://pvoutput.org/service/r2'),
-        dryRun: bool('PVOUTPUT_DRY_RUN', false),
-        // How often the aggregated whole-array power reading is published.
-        // 300s matches PVOutput's standard 5-minute status interval (12 req/h).
-        postIntervalMs: int('PVOUTPUT_POST_INTERVAL_SECONDS', 300, { min: 60 }) * 1000,
-        // Power is averaged over this trailing window before being published.
-        averageWindowMs: int('POWER_AVERAGE_WINDOW_SECONDS', 300, { min: 30 }) * 1000,
-        microInverterMode: bool('PVOUTPUT_MICROINVERTER_MODE', false),
-        // Every mapped inverter costs one request per cycle, so this defaults
-        // to a slower cadence to stay inside the 60 req/h free-tier budget.
-        microIntervalMs: int('PVOUTPUT_MICROINVERTER_INTERVAL_SECONDS', 900, { min: 60 }) * 1000,
-        mapping: parseMapping(str('PVOUTPUT_MICROINVERTER_MAPPING', '')),
-        // Requests per hour the account is allowed. Free = 60, donator = 300.
-        rateLimitPerHour: int('PVOUTPUT_RATE_LIMIT_PER_HOUR', 60, { min: 1 }),
-        // Queued readings older than this are dropped rather than back-filled.
-        maxQueueAgeMs: int('PVOUTPUT_MAX_QUEUE_AGE_HOURS', 24, { min: 1 }) * 3600 * 1000,
+      web: {
+        enabled: bool('WEB_ENABLED', true),
+        port: int('WEB_PORT', 8080, { min: 1, max: 65535 }),
+        address: str('WEB_ADDRESS', '0.0.0.0'),
+        // Window used for the "live" smoothed reading on the dashboard.
+        liveWindowSeconds: int('LIVE_WINDOW_SECONDS', 120, { min: 10 }),
+        // Older than this and the dashboard reports the Egate as stale.
+        staleAfterSeconds: int('LIVE_STALE_AFTER_SECONDS', 300, { min: 30 }),
       },
+
+      inverterLabels: parseLabels(str('INVERTER_LABELS', '')),
 
       relay: {
         enabled: bool('INVOLAR_RELAY', false),
@@ -118,7 +116,6 @@ export function loadConfig(env = process.env) {
         timeoutMs: int('INVOLAR_TIMEOUT_SECONDS', 10, { min: 1 }) * 1000,
       },
 
-      dataDir: str('DATA_DIR', './data'),
       rawLog: {
         enabled: bool('RAW_LOG', false),
         maxBytes: int('RAW_LOG_MAX_BYTES', 5 * 1024 * 1024, { min: 1024 }),
@@ -126,23 +123,10 @@ export function loadConfig(env = process.env) {
       },
     };
 
-    const problems = [];
-    if (!cfg.pvoutput.dryRun) {
-      if (!cfg.pvoutput.apiKey) problems.push('PVOUTPUT_API_KEY is required');
-      if (!/^\d+$/.test(cfg.pvoutput.systemId)) {
-        problems.push('PVOUTPUT_SYSTEM_ID is required and must be numeric');
-      }
-    }
-    if (cfg.pvoutput.microInverterMode && Object.keys(cfg.pvoutput.mapping).length === 0) {
-      problems.push('PVOUTPUT_MICROINVERTER_MODE is enabled but PVOUTPUT_MICROINVERTER_MAPPING is empty');
-    }
     try {
       new Intl.DateTimeFormat('en-US', { timeZone: cfg.tz });
     } catch {
-      problems.push(`TZ "${cfg.tz}" is not a recognised IANA time zone`);
-    }
-    if (problems.length) {
-      throw new Error(`Invalid configuration:\n  - ${problems.join('\n  - ')}`);
+      throw new Error(`Invalid configuration:\n  - TZ "${cfg.tz}" is not a recognised IANA time zone`);
     }
 
     return cfg;

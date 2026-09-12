@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solar</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#9728;</text></svg>">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>Solar</h1>
+    <span class="pill" id="statusPill" data-state="offline">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="statusText">Connecting…</span>
+    </span>
+    <span class="spacer"></span>
+    <button id="themeBtn" type="button" title="Switch between light and dark">Theme</button>
+  </header>
+
+  <div id="error" class="err" hidden></div>
+
+  <section class="tiles" aria-label="Current output">
+    <div class="tile hero">
+      <div class="label">Now</div>
+      <div class="value"><span id="nowW">–</span><span class="unit">W</span></div>
+      <div class="sub" id="nowSub">&nbsp;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Today</div>
+      <div class="value"><span id="todayKwh">–</span><span class="unit">kWh</span></div>
+      <div class="sub" id="todaySub">&nbsp;</div>
+    </div>
+    <div class="tile">
+      <div class="label">Today's peak</div>
+      <div class="value"><span id="peakW">–</span><span class="unit">W</span></div>
+      <div class="sub" id="peakSub">&nbsp;</div>
+    </div>
+    <div class="tile">
+      <div class="label">This month</div>
+      <div class="value"><span id="monthKwh">–</span><span class="unit">kWh</span></div>
+      <div class="sub" id="monthSub">&nbsp;</div>
+    </div>
+  </section>
+
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-live" aria-controls="panel-live" aria-selected="true">Live</button>
+    <button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false">History</button>
+    <button role="tab" id="tab-summary" aria-controls="panel-summary" aria-selected="false">Summaries</button>
+  </nav>
+
+  <!-- ------------------------------------------------------------- Live -->
+  <section id="panel-live" role="tabpanel" aria-labelledby="tab-live">
+    <div class="card">
+      <header>
+        <h2>Output over the last 2 hours</h2>
+        <span class="note">Watts, refreshed every 5 seconds</span>
+      </header>
+      <div class="chart-wrap" id="liveChart">
+        <canvas aria-label="Array output in watts over the last two hours"></canvas>
+        <div class="empty" hidden>No readings yet. The chart fills in as the Egate reports.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <header>
+        <h2>Per inverter, today</h2>
+        <span class="note">Energy each micro-inverter reports for today</span>
+      </header>
+      <div class="bars" id="inverterBars"></div>
+      <div class="empty" id="inverterEmpty" style="height:90px" hidden>
+        No per-inverter data today. The Egate sends these periodically.
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------- History -->
+  <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <!-- One filter row above everything it scopes. -->
+    <div class="filters" id="rangeFilters">
+      <span class="label">Range</span>
+      <div class="group">
+        <button type="button" data-range="6h">6 hours</button>
+        <button type="button" data-range="24h" aria-pressed="true">24 hours</button>
+        <button type="button" data-range="7d">7 days</button>
+        <button type="button" data-range="30d">30 days</button>
+        <button type="button" data-range="90d">90 days</button>
+        <button type="button" data-range="1y">1 year</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <header>
+        <h2>Array output</h2>
+        <span class="note" id="historyNote"></span>
+        <span class="spacer"></span>
+        <button type="button" id="historyTableBtn" aria-pressed="false">Table</button>
+      </header>
+      <div class="chart-wrap" id="historyChart">
+        <canvas aria-label="Array output in watts over the selected range"></canvas>
+        <div class="empty" hidden>Nothing recorded in this range.</div>
+      </div>
+      <div class="table-wrap" id="historyTable" hidden></div>
+    </div>
+  </section>
+
+  <!-- -------------------------------------------------------- Summaries -->
+  <section id="panel-summary" role="tabpanel" aria-labelledby="tab-summary" hidden>
+    <div class="filters" id="periodFilters">
+      <span class="label">Group by</span>
+      <div class="group">
+        <button type="button" data-period="day" aria-pressed="true">Daily</button>
+        <button type="button" data-period="week">Weekly</button>
+        <button type="button" data-period="month">Monthly</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <header>
+        <h2 id="summaryTitle">Energy per day</h2>
+        <span class="note" id="summaryNote"></span>
+        <span class="spacer"></span>
+        <button type="button" id="summaryTableBtn" aria-pressed="false">Table</button>
+      </header>
+      <div class="chart-wrap" id="summaryChart">
+        <canvas aria-label="Generated energy per period"></canvas>
+        <div class="empty" hidden>No completed days recorded yet.</div>
+      </div>
+      <div class="table-wrap" id="summaryTable" hidden></div>
+    </div>
+  </section>
+
+  <footer class="status" id="footer"></footer>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

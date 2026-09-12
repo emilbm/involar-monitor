@@ -1,8 +1,8 @@
 services:
-  involar2pvoutput:
+  solar:
     build: .
-    image: involar2pvoutput:2
-    container_name: involar2pvoutput
+    image: involar-solar:3
+    container_name: involar-solar
     restart: unless-stopped
     env_file: .env
 
@@ -11,12 +11,12 @@ services:
       # well-known ports. Inside the container we listen high and unprivileged.
       - "1020:11020"
       - "9800:19800"
-      # Status endpoint. Drop this line if you do not want it reachable.
+      # The dashboard. It is unauthenticated - keep it on the LAN.
       - "8080:8080"
 
     volumes:
-      # Holds the retry queue, so a restart never loses buffered readings.
-      - involar-data:/app/data
+      # Holds solar.db. This is the only thing worth backing up.
+      - solar-data:/app/data
 
     # Without this a long-running container can quietly fill the VM's disk.
     logging:
@@ -25,7 +25,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # The Egate speaks plain TCP and we only make outbound HTTPS calls.
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -33,4 +32,4 @@ services:
       - /tmp
 
 volumes:
-  involar-data:
+  solar-data:

@@ -1,28 +1,59 @@
 /**
- * PVOutput expects the local wall-clock date/time of the *reading*, in the
- * system's configured time zone. Capturing it when the reading is taken (not
- * when it is finally uploaded) is what makes retries safe.
+ * All bucketing is done in the configured local time zone: a "day" on the
+ * dashboard is the day you actually lived through, not a UTC day.
  */
 export function createClock(timeZone) {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
+  const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
   });
+
+  function fields(at) {
+    const f = Object.fromEntries(
+      parts.formatToParts(at).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]),
+    );
+    // Some ICU versions render midnight as hour "24".
+    if (f.hour === '24') f.hour = '00';
+    return f;
+  }
 
   return {
     timeZone,
-    /** @returns {{date: string, time: string}} e.g. { date:'20260912', time:'14:35' } */
-    stamp(at = new Date()) {
-      const parts = Object.fromEntries(
-        fmt.formatToParts(at).filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]),
+
+    /** `YYYY-MM-DD` in local time. */
+    day(at = new Date()) {
+      const f = fields(at);
+      return `${f.year}-${f.month}-${f.day}`;
+    },
+
+    /** `YYYY-MM-DDTHH` in local time - the key for hourly rollups. */
+    hour(at = new Date()) {
+      const f = fields(at);
+      return `${f.year}-${f.month}-${f.day}T${f.hour}`;
+    },
+
+    /** Unix seconds at the start of the local hour containing `at`. */
+    hourStart(at = new Date()) {
+      const f = fields(at);
+      return Math.floor(at.getTime() / 1000) - (Number(f.minute) * 60 + Number(f.second));
+    },
+
+    /** Offset from UTC in seconds at that instant, e.g. +7200 for CEST. */
+    offsetSeconds(at = new Date()) {
+      const f = fields(at);
+      const asUtc = Date.UTC(
+        Number(f.year), Number(f.month) - 1, Number(f.day),
+        Number(f.hour), Number(f.minute), Number(f.second),
       );
-      // Intl renders midnight as "24" in some ICU versions; normalise it.
-      const hour = parts.hour === '24' ? '00' : parts.hour;
-      return {
-        date: `${parts.year}${parts.month}${parts.day}`,
-        time: `${hour}:${parts.minute}`,
-      };
+      return Math.round((asUtc - Math.floor(at.getTime() / 1000) * 1000) / 1000);
+    },
+
+    /** `HH:mm` in local time, for log lines. */
+    hhmm(at = new Date()) {
+      const f = fields(at);
+      return `${f.hour}:${f.minute}`;
     },
   };
 }

@@ -1,11 +1,13 @@
 import { loadConfig } from './config.js';
 import { configureLogger, createLogger } from './logger.js';
 import { createClock } from './clock.js';
-import { PowerWindow, InverterTotals } from './aggregator.js';
-import { PvOutputClient } from './pvoutput.js';
+import { Store } from './store.js';
 import { EgateServer } from './server.js';
 import { RawLog } from './rawlog.js';
-import { startHealthServer } from './health.js';
+import { createApi } from './web/api.js';
+import { createWebServer } from './web/server.js';
+
+const PRUNE_INTERVAL_MS = 6 * 3600 * 1000;
 
 let cfg;
 try {
@@ -19,9 +21,12 @@ configureLogger({ level: cfg.logLevel, tz: cfg.tz });
 const log = createLogger('main');
 
 const clock = createClock(cfg.tz);
-const powerWindow = new PowerWindow(cfg.pvoutput.averageWindowMs);
-const totals = new InverterTotals();
-const uploader = new PvOutputClient(cfg.pvoutput, { dataDir: cfg.dataDir });
+const store = new Store({
+  dbPath: cfg.db.path,
+  clock,
+  maxGapSeconds: cfg.db.maxGapSeconds,
+  retentionDays: cfg.db.retentionDays,
+});
 const rawLog = new RawLog({
   enabled: cfg.rawLog.enabled,
   dir: cfg.dataDir,
@@ -32,12 +37,13 @@ const rawLog = new RawLog({
 const runtime = {
   startedAt: Date.now(),
   listening: false,
+  connections: 0,
   bytes: 0,
   frames: 0,
+  unknownFrames: 0,
   lastFrameAt: null,
-  lastStatusAt: null,
   lastPeer: null,
-  unmappedSerials: new Set(),
+  seenSerials: new Set(),
 };
 
 const stats = {
@@ -47,36 +53,24 @@ const stats = {
 
 function onFrame(decoded, meta) {
   runtime.frames += 1;
-  runtime.lastFrameAt = Date.now();
+  runtime.lastFrameAt = Math.floor(Date.now() / 1000);
 
   switch (decoded.kind) {
-    case 'status':
-      runtime.lastStatusAt = Date.now();
-      powerWindow.add(decoded.watts);
-      log.debug('array power', { watts: decoded.watts, samples: powerWindow.size });
-      break;
-
-    case 'detail': {
-      const sid = cfg.pvoutput.mapping[decoded.serial];
-      if (!sid) {
-        // Log each unknown serial once, not on every table dump. Capped so a
-        // stream of garbage frames cannot grow this without bound.
-        if (!runtime.unmappedSerials.has(decoded.serial) && runtime.unmappedSerials.size < 64) {
-          runtime.unmappedSerials.add(decoded.serial);
-          log.warn('no PVOUTPUT_MICROINVERTER_MAPPING entry for this serial', {
-            serial: decoded.serial,
-            energyWh: Math.round(decoded.energyWh),
-          });
-        }
-        break;
-      }
-      if (totals.record(decoded.serial, decoded.energyWh)) {
-        log.debug('inverter daily energy', {
-          serial: decoded.serial, sid, energyWh: Math.round(decoded.energyWh),
-        });
-      }
+    case 'status': {
+      // Every reading is stored exactly as reported - this is one household's
+      // own array, so there is nothing to filter or sanity-check against.
+      const row = store.recordPower(decoded.watts);
+      log.debug('array power', { watts: decoded.watts, wh: row?.wh?.toFixed(3) });
       break;
     }
+
+    case 'detail':
+      if (runtime.seenSerials.size < 256) runtime.seenSerials.add(decoded.serial);
+      store.recordInverterEnergy(decoded.serial, decoded.energyWh);
+      log.debug('inverter daily energy', {
+        serial: decoded.serial, energyWh: Math.round(decoded.energyWh),
+      });
+      break;
 
     case 'serial':
     case 'keepalive':
@@ -84,86 +78,53 @@ function onFrame(decoded, meta) {
       break;
 
     default:
+      runtime.unknownFrames += 1;
       log.warn('undecodable frame', { kind: decoded.kind, ...decoded, peer: meta.peer });
   }
 }
 
 function onRaw(frame, decoded, port) {
   if (!cfg.rawLog.enabled) return;
-  const { date, time } = clock.stamp();
-  rawLog.write(`${date} ${time}\t${port}\t${decoded.kind}\t${frame.toString('hex')}`);
-}
-
-function publishArrayPower() {
-  const summary = powerWindow.summarise();
-  if (!summary) {
-    log.debug('no power samples in the window, nothing to publish');
-    return;
-  }
-  const { date, time } = clock.stamp();
-  uploader.enqueue(cfg.pvoutput.systemId, { date, time, power: summary.average });
-  log.info('array power queued', {
-    watts: Math.round(summary.average), samples: summary.count, date, time,
-  });
-}
-
-function publishInverters() {
-  const readings = totals.drain();
-  if (!readings.length) return;
-  const { date, time } = clock.stamp();
-  for (const { serial, energyWh } of readings) {
-    const sid = cfg.pvoutput.mapping[serial];
-    if (!sid) continue;
-    uploader.enqueue(sid, { date, time, energy: energyWh });
-  }
-  log.info('inverter energy queued', { inverters: readings.length, date, time });
+  rawLog.write(
+    `${clock.day()} ${clock.hhmm()}\t${port}\t${decoded.kind}\t${frame.toString('hex')}`,
+  );
 }
 
 const egate = new EgateServer(cfg, { onFrame, onRaw, stats });
+const api = createApi({
+  store,
+  clock,
+  config: cfg,
+  runtime: new Proxy(runtime, {
+    get: (t, k) => (k === 'connections' ? egate.openConnections : t[k]),
+  }),
+});
 
 const timers = [];
-let healthServer = null;
+let webServer = null;
 
 async function main() {
-  log.info('involar2pvoutput starting', {
+  log.info('involar-solar starting', {
     tz: cfg.tz,
     ports: cfg.listen.ports,
-    dryRun: cfg.pvoutput.dryRun,
-    microInverterMode: cfg.pvoutput.microInverterMode,
-    postIntervalSeconds: cfg.pvoutput.postIntervalMs / 1000,
+    db: cfg.db.path,
+    web: cfg.web.enabled ? cfg.web.port : 'disabled',
   });
 
-  if (cfg.pvoutput.dryRun && !cfg.pvoutput.systemId) {
-    log.warn('dry run without PVOUTPUT_SYSTEM_ID: array readings will be logged '
-      + 'with an empty system id. Set it to see exactly what will be posted.');
-  }
-
+  store.open();
+  store.prune();
   rawLog.open();
-  await uploader.start();
+
   await egate.listen();
   runtime.listening = true;
 
-  timers.push(setInterval(publishArrayPower, cfg.pvoutput.postIntervalMs));
-  if (cfg.pvoutput.microInverterMode) {
-    timers.push(setInterval(publishInverters, cfg.pvoutput.microIntervalMs));
-  }
+  timers.push(setInterval(() => {
+    try { store.prune(); } catch (err) { log.warn('prune failed', err); }
+  }, PRUNE_INTERVAL_MS));
 
-  if (cfg.health.enabled) {
-    healthServer = await startHealthServer({
-      port: cfg.health.port,
-      snapshot: () => ({
-        listening: runtime.listening,
-        uptimeSeconds: Math.round((Date.now() - runtime.startedAt) / 1000),
-        connections: egate.openConnections,
-        lastPeer: runtime.lastPeer,
-        framesReceived: runtime.frames,
-        bytesReceived: runtime.bytes,
-        lastFrameAt: runtime.lastFrameAt && new Date(runtime.lastFrameAt).toISOString(),
-        lastStatusAt: runtime.lastStatusAt && new Date(runtime.lastStatusAt).toISOString(),
-        powerSamplesInWindow: powerWindow.size,
-        unmappedSerials: [...runtime.unmappedSerials],
-        pvoutput: uploader.stats(),
-      }),
+  if (cfg.web.enabled) {
+    webServer = await createWebServer({
+      api, port: cfg.web.port, address: cfg.web.address,
     });
   }
 }
@@ -175,18 +136,12 @@ async function shutdown(signal) {
   log.info(`received ${signal}, shutting down`);
 
   for (const t of timers) clearInterval(t);
-  // Publish whatever is still in the window so a restart does not lose it.
-  try { publishArrayPower(); } catch { /* best effort */ }
-  if (cfg.pvoutput.microInverterMode) {
-    try { publishInverters(); } catch { /* best effort */ }
-  }
-
   await Promise.allSettled([
     egate.close(),
-    uploader.stop(),
-    healthServer && new Promise((r) => healthServer.close(() => r())),
+    webServer && new Promise((r) => webServer.close(() => r())),
   ]);
   rawLog.close();
+  store.close();
   log.info('goodbye');
   process.exit(0);
 }

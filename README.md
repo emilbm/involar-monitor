@@ -1,15 +1,18 @@
-# involar2pvoutput
+# involar-solar
 
-Receives telemetry from an Involar/Sedas **Egate** solar gateway and forwards it
-to [PVOutput.org](https://pvoutput.org).
+Receives telemetry from an Involar/Sedas **Egate** solar gateway, stores it
+locally, and serves a dashboard for it.
 
 Involar is gone and the service the Egate talks to no longer exists. The Egate
 has `involar.com` hardcoded, so you point that name at a box on your own LAN
 using a DNS override, and this service answers in Involar's place.
 
 ```
- Egate ──TCP 1020/9800──▶ [ DNS override ] ──▶ involar2pvoutput ──HTTPS──▶ PVOutput.org
+ Egate ──TCP 1020/9800──▶ [ DNS override ] ──▶ involar-solar ──▶ SQLite ──▶ dashboard :8080
 ```
+
+Nothing leaves the house and there are no accounts, keys, or third-party
+services involved.
 
 ---
 
@@ -23,31 +26,36 @@ cd involar2pvoutput
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum `PVOUTPUT_API_KEY`, `PVOUTPUT_SYSTEM_ID` and
-`TZ`. Then:
+Set `TZ` in `.env` (everything else has a working default), then:
 
 ```bash
 docker compose up -d --build
 ```
 
-Watch it come up:
+Open **http://\<vm-ip\>:8080**. Follow the logs with `docker compose logs -f`.
 
-```bash
-docker compose logs -f
-```
+---
 
-Check its state at any time:
+## The dashboard
 
-```bash
-curl -s localhost:8080 | jq
-```
+Three views, plus a row of stat tiles that is always visible (current output,
+today's energy, today's peak, month to date).
 
-### First run, before you trust it
+**Live** — current output with a two-hour chart that refreshes every five
+seconds, and each micro-inverter's contribution today. The "Now" figure is a
+short rolling mean, which is far steadier to read than the raw reading; the raw
+one is shown underneath it.
 
-Set `PVOUTPUT_DRY_RUN=true` and `LOG_LEVEL=debug` in `.env`. Everything runs
-normally but nothing is uploaded — the log shows exactly what *would* be sent,
-and which inverter serials the Egate is reporting. Flip it back to `false` once
-the numbers look right.
+**History** — output over 6 hours to a year. The resolution switches itself:
+raw samples under three days, hourly means out to ninety, daily beyond that.
+Each point carries its bucket's peak as well as its mean, so smoothing never
+hides a real spike.
+
+**Summaries** — energy per day, week or month. Weeks are ISO weeks, starting
+Monday.
+
+Every chart has a hover tooltip, arrow-key navigation, and a **Table** toggle
+that shows the same numbers as text.
 
 ---
 
@@ -70,8 +78,8 @@ dig +short involar.com @<your-dns-ip>
 
 ### Why ports are mapped 1020→11020
 
-The container runs as a non-root user, which cannot bind ports below 1024.
-So the host publishes the well-known ports and the app listens high inside:
+The container runs as a non-root user, which cannot bind ports below 1024. So
+the host publishes the well-known ports and the app listens high inside:
 
 ```yaml
 ports:
@@ -84,119 +92,136 @@ change the right-hand side of these mappings to match.
 
 ---
 
-## Configuration
+## Storage
 
-Everything is set through environment variables — see [`.env.example`](.env.example)
-for the annotated list. The ones that matter most:
+Everything lives in one SQLite file, `solar.db`, in the `solar-data` volume.
 
-| Variable | Default | Notes |
+| Table | What it holds | Kept |
 |---|---|---|
-| `PVOUTPUT_API_KEY` | — | Required. pvoutput.org → Settings → API Settings. |
-| `PVOUTPUT_SYSTEM_ID` | — | Required. Numeric System Id of the whole array. |
-| `TZ` | `Europe/Amsterdam` | **Set this.** PVOutput records local wall-clock time. |
-| `PVOUTPUT_POST_INTERVAL_SECONDS` | `300` | How often the array power is published. |
-| `PVOUTPUT_RATE_LIMIT_PER_HOUR` | `60` | 60 free, 300 donator. The uploader paces itself to fit. |
-| `PVOUTPUT_DRY_RUN` | `false` | Log uploads instead of sending them. |
-| `LOG_LEVEL` | `info` | `debug` shows every decoded frame. |
+| `samples` | one row per reading the Egate sends | `SAMPLE_RETENTION_DAYS` (400) |
+| `hourly` | mean, peak and energy per hour | forever |
+| `daily` | energy, peak and peak time per day | forever |
+| `inverter_daily` | each micro-inverter's daily total | forever |
 
-Bad configuration fails at startup with a specific message, rather than at the
-first upload hours later.
+The rollups are maintained as readings arrive, not recomputed on read, so a
+year-long chart is as fast as an hour-long one — and long-range history stays
+readable after the raw samples are pruned.
 
-### Per-inverter output (optional)
+Energy is integrated trapezoidally between consecutive readings. A gap longer
+than `ENERGY_MAX_GAP_SECONDS` (15 minutes) contributes nothing, so an outage or
+the overnight silence can never invent generation that did not happen.
 
-If you have a PVOutput system per micro-inverter, map the last four hex digits
-of each serial to its system id:
+Any wattage the Egate reports is stored exactly as received. This is one
+household's own array; there is nothing to filter against.
 
-```dotenv
-PVOUTPUT_MICROINVERTER_MODE=true
-PVOUTPUT_MICROINVERTER_MAPPING=1a2b=11111,3c4d=22222
+The database runs in WAL mode with `synchronous=NORMAL`, which is the right
+trade for data that is nice to have rather than a ledger: fast writes, and a
+hard power cut at the wrong moment costs you recent history, never the live
+readings. Back it up if you care:
+
+```bash
+docker compose exec solar sh -c 'cd /app/data && sqlite3 solar.db ".backup backup.db"' 2>/dev/null \
+  || docker run --rm -v solar-data:/d -v "$PWD":/out alpine cp /d/solar.db /out/solar-backup.db
 ```
-
-Run once with `LOG_LEVEL=debug` and the serials the Egate reports show up in the
-log, including any that have no mapping yet.
-
-**Mind the rate limit.** Each mapped inverter costs one request per cycle. With
-the defaults (array every 5 min, inverters every 15 min) seven inverters comes
-to 12 + 28 = 40 requests/hour, inside the free-tier 60. Raise
-`PVOUTPUT_MICROINVERTER_INTERVAL_SECONDS` if you have more.
 
 ---
 
-## Operating it
+## JSON API
 
-**Status endpoint** — `GET http://<vm>:8080` returns connection count, frames
-received, last frame time, upload queue depth, remaining rate-limit budget and
-the last error. The Docker `HEALTHCHECK` uses it.
+The dashboard is a client of this; so can anything else on your LAN be
+(Home Assistant, Grafana, a script).
 
-Health deliberately means *"the listeners are up"*, nothing more. Solar output
-stops every night; tying health to recent telemetry would restart-loop the
-container after dark. Use `lastStatusAt` in the JSON body to spot a silent Egate.
+| Endpoint | Returns |
+|---|---|
+| `GET /api/live` | current output, today's totals, per-inverter energy |
+| `GET /api/series?from=&to=&resolution=` | power over time; `resolution` is `auto`, `sample`, `hour` or `day` |
+| `GET /api/summary?period=&limit=` | energy per `day`, `week` or `month` |
+| `GET /api/inverters?from=&to=` | per-inverter energy across a day range |
+| `GET /api/status` | uptime, frame counts, database stats |
+| `GET /health` | 200 while the listeners are up — the Docker healthcheck |
 
-**Persistence** — the retry queue lives in the `involar-data` volume, so a
-restart, a reboot or a `docker compose pull` never drops buffered readings.
-
-**Frame logging** — set `RAW_LOG=true` to append every frame as hex to
-`/app/data/frames.log` for decoding work. It rotates at 5 MB × 3 files. Off by
-default; v1 wrote these files unbounded until the disk filled.
-
-**Updating**
+`from`/`to` are unix seconds on `/api/series`, and `YYYY-MM-DD` elsewhere.
 
 ```bash
-git pull && docker compose up -d --build
+curl -s localhost:8080/api/live | jq '.watts, .today.kwh'
 ```
+
+**There is no authentication.** It is a LAN dashboard for your own generation
+data. Do not forward port 8080 from the internet; put it behind a reverse proxy
+with auth, or a VPN, if you want it from outside.
+
+---
+
+## Configuration
+
+Everything is set through environment variables — see [`.env.example`](.env.example)
+for the annotated list. The ones that matter:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TZ` | `Europe/Amsterdam` | **Set this.** Day/week/month boundaries use it. |
+| `SAMPLE_RETENTION_DAYS` | `400` | Raw samples only; rollups are kept forever. `0` keeps everything. |
+| `WEB_PORT` | `8080` | Dashboard and API. |
+| `LIVE_WINDOW_SECONDS` | `120` | Smoothing window for the "Now" figure. |
+| `INVERTER_LABELS` | — | `1a2b=Roof south,3c4d=Garage` |
+| `LOG_LEVEL` | `info` | `debug` logs every decoded frame. |
+
+Bad configuration fails at startup with a specific message rather than hours
+later.
+
+### Naming your inverters
+
+Unlabelled inverters appear under their 4-hex-digit serial, and the dashboard
+footer lists any serial that has no label yet. Copy them into `INVERTER_LABELS`
+and restart.
 
 ---
 
 ## Reliability notes
 
-This rework fixes a set of problems in v1 that would have bitten you on a
-long-running box:
+Carried over from the rework that containerised this, and still true:
 
-- **Both ports now bind.** v1 called `listen()` twice on one `net.Server`, which
-  throws `ERR_SERVER_ALREADY_LISTEN`; port 9800 never came up.
-- **TCP is treated as a stream.** v1 assumed one `data` event was one message
-  and guessed the message type from the event's length. A detail dump split
-  across segments was mis-parsed. Frames are now reassembled on 32-byte
+- **Both ports bind.** The original called `listen()` twice on one `net.Server`,
+  which throws `ERR_SERVER_ALREADY_LISTEN`; port 9800 never came up.
+- **TCP is treated as a stream.** The original assumed one `data` event was one
+  message and guessed the message type from the event's length, so a detail dump
+  split across segments was mis-parsed. Frames are reassembled on 32-byte
   boundaries and classified by their type byte.
-- **Uploads are paced and retried.** v1 posted on *every* status frame — far past
-  PVOutput's 60 req/hour limit — and only `console.log`ged the response, so
-  failures were invisible. Readings are now averaged over a window, published on
-  a fixed cadence, queued durably, retried with exponential backoff, batched via
-  `addbatchstatus` when a backlog exists, and paused when PVOutput's rate-limit
-  headers say to stop.
-- **Retries keep the reading's own timestamp**, so a recovered outage back-fills
-  correctly instead of stacking everything at the recovery time.
-- **The rolling average is correct.** v1 pruned with `splice()` inside a
-  `forEach()`, which skips elements.
-- **Serials with hex letters work.** v1's `if (serial > 0)` is `NaN > 0` for a
-  serial like `1a2b`, silently dropping those inverters.
-- **The process stays up.** The relay socket had no `error` handler, so an
-  unreachable Involar host crashed the process on an unhandled `'error'` event.
-  Idle connections are now reaped, listeners survive stray socket errors, and a
-  genuine crash exits cleanly so Docker restarts it.
-- **Nothing grows without bound** — frame logs rotate, container logs are capped,
-  and the upload queue has a size and age limit.
-- **No dependencies.** `request` and `moment` are both unmaintained; the app now
-  uses built-in `fetch` and `Intl`. Zero `node_modules`, nothing to audit.
-- **Secrets are out of the repo.** v1 kept the API key in a tracked `config.js`.
+- **Serials with hex letters work.** The original's `if (serial > 0)` is
+  `NaN > 0` for a serial like `1a2b`, silently dropping those inverters.
+- **The process stays up.** The relay socket has an `error` handler (an
+  unreachable host used to crash the process), idle connections are reaped,
+  listeners survive stray socket errors, and a genuine crash exits cleanly so
+  Docker restarts it.
+- **Nothing grows without bound** — raw samples are pruned, frame logs rotate,
+  container logs are capped.
+- **No dependencies.** Built-in `node:sqlite`, `fetch` and `Intl`; zero
+  `node_modules`, nothing to audit or update.
+
+---
 
 ## Development
 
-Requires Node 20+. No dependencies to install.
+Requires Node 24+ (for `node:sqlite` without a flag). Nothing to install.
 
 ```bash
 npm test
 ```
 
-Run against a simulated Egate without any hardware:
+Run it against generated history, with no hardware and no waiting for sun:
 
 ```bash
-PVOUTPUT_DRY_RUN=true LOG_LEVEL=debug LISTEN_PORTS=11020 node src/index.js
-node test/tools/fake-egate.js 127.0.0.1 11020
+node test/tools/seed.js 120 ./data/dev.db
+DB_PATH=./data/dev.db TZ=Europe/Copenhagen npm start
 ```
 
-The simulator deliberately splits a detail dump mid-frame to exercise the stream
-reassembly.
+Or drive it with a simulated Egate, which deliberately splits a detail dump
+mid-frame to exercise the stream reassembly:
+
+```bash
+LISTEN_PORTS=11020 npm start
+node test/tools/fake-egate.js 127.0.0.1 11020
+```
 
 ## Credits
 

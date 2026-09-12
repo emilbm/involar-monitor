@@ -1,16 +1,18 @@
 {
-  "name": "involar2pvoutput",
-  "version": "2.0.0",
-  "description": "Receives DNS-redirected Involar/Sedas Egate solar telemetry and forwards it to PVOutput.org",
+  "name": "involar-solar",
+  "version": "3.0.0",
+  "description": "Receives DNS-redirected Involar/Sedas Egate solar telemetry, stores it in SQLite, and serves a dashboard",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\"",
+    "seed": "node test/tools/seed.js",
+    "fake-egate": "node test/tools/fake-egate.js"
   },
   "repository": {
     "type": "git",
