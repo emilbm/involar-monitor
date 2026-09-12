@@ -1,0 +1,36 @@
+services:
+  involar2pvoutput:
+    build: .
+    image: involar2pvoutput:2
+    container_name: involar2pvoutput
+    restart: unless-stopped
+    env_file: .env
+
+    ports:
+      # The Egate has involar.com:1020 hardcoded, so the host must answer on the
+      # well-known ports. Inside the container we listen high and unprivileged.
+      - "1020:11020"
+      - "9800:19800"
+      # Status endpoint. Drop this line if you do not want it reachable.
+      - "8080:8080"
+
+    volumes:
+      # Holds the retry queue, so a restart never loses buffered readings.
+      - involar-data:/app/data
+
+    # Without this a long-running container can quietly fill the VM's disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # The Egate speaks plain TCP and we only make outbound HTTPS calls.
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  involar-data:
